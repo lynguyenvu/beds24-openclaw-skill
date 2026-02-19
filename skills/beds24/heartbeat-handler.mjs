@@ -7,10 +7,55 @@
 
 import { execSync } from "child_process";
 import { readFileSync } from "fs";
+import { homedir } from "os";
 import { isNoRoomMessage, verifyNoRoomAlert } from "./utils/availability-checker.mjs";
 
 const TELEGRAM_TOKEN_FILE = "/root/.clawdbot/secrets/telegram-token.txt";
 const TELEGRAM_CHAT_ID = "6393249637";
+
+/**
+ * Get Gemini API key from credentials file
+ */
+function getGeminiApiKey() {
+  try {
+    const credsPath = `${homedir()}/.openclaw/credentials/postgres.enc`;
+    const creds = readFileSync(credsPath, "utf-8");
+    const line = creds.split("\n").find((l) => l.startsWith("gemini_api_key="));
+    if (!line) return null;
+    const encoded = line.split("=")[1];
+    return Buffer.from(encoded, "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * AI-based intention analysis using Gemini
+ */
+async function analyzeIntentionWithAI(message) {
+  if (!message) return "normal";
+
+  const prompt = `Analyze this customer message and return ONLY one intention: complaint, urgent, cancel, problem, question, or normal.
+Message: "${message}"
+Intention:`;
+
+  try {
+    const response = execSync(
+      `curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\${getGeminiApiKey()}" \
+        -H "Content-Type: application/json" \
+        -d '{"contents":[{"parts":[{"text":"${prompt.replace(/"/g, '\\"')}"}]}]}'`,
+      { encoding: "utf-8", timeout: 10000 },
+    );
+    const result = JSON.parse(response);
+    const text =
+      result.candidates?.[0]?.content?.parts?.[0]?.text?.toLowerCase()?.trim() || "normal";
+    if (["complaint", "urgent", "cancel", "problem", "question"].includes(text)) return text;
+    return "normal";
+  } catch {
+    // Fallback to keyword-based
+    return analyzeIntentionKeywords(message);
+  }
+}
 
 // Đọc Telegram token
 function getTelegramToken() {
@@ -152,12 +197,47 @@ function parsePancakeOutput(output) {
 }
 
 /**
+ * Get password from credentials file
+ */
+function getPostgresPassword() {
+  try {
+    const credsPath = `${homedir()}/.openclaw/credentials/postgres.enc`;
+    const creds = readFileSync(credsPath, "utf-8");
+    const line = creds.split("\n").find((l) => l.startsWith("agent_monitor_ro="));
+    if (!line) throw new Error("agent_monitor_ro not found in credentials");
+    const encoded = line.split("=")[1];
+    return Buffer.from(encoded, "base64").toString("utf-8");
+  } catch (error) {
+    console.error("Failed to read postgres password:", error.message);
+    return null;
+  }
+}
+
+/**
+ * Load custom risk patterns from config file
+ */
+function loadRiskPatterns() {
+  try {
+    const patternsPath = `${homedir()}/.openclaw/credentials/risk-patterns.json`;
+    const content = readFileSync(patternsPath, "utf-8");
+    return JSON.parse(content);
+  } catch (error) {
+    // Return default patterns if file not found
+    return { customPatterns: [], watchList: { bookings: [], guests: [] } };
+  }
+}
+
+// Load patterns once at startup
+const riskConfig = loadRiskPatterns();
+
+/**
  * Query PostgreSQL trực tiếp qua psql
  */
 function queryPostgres(sql) {
   try {
-    const connStr =
-      "postgresql://agent_monitor_ro:MonRO_2026_Beds24_Read@36.50.177.146:5433/beds24?sslmode=disable";
+    const password = getPostgresPassword();
+    if (!password) throw new Error("Could not get postgres password");
+    const connStr = `postgresql://agent_monitor_ro:${password}@36.50.177.146:5433/beds24?sslmode=disable`;
     const cmd = `psql "${connStr}" -t -A -F"|" -c "${sql.replace(/"/g, '\\"')}"`;
 
     const output = execSync(cmd, { encoding: "utf-8", timeout: 30000 });
@@ -242,12 +322,21 @@ function getBeds24Messages() {
 }
 
 /**
- * Phân tích intention của tin nhắn
+ * Phân tích intention của tin nhắn (với custom patterns)
  */
-function analyzeIntention(message) {
+function analyzeIntentionKeywords(message) {
   if (!message) return "normal";
 
   const msg = message.toLowerCase();
+
+  // Check custom patterns first (higher priority)
+  for (const pattern of riskConfig.customPatterns || []) {
+    for (const keyword of pattern.keywords || []) {
+      if (msg.includes(keyword.toLowerCase())) {
+        return pattern.intention || "complaint";
+      }
+    }
+  }
 
   // Complaint keywords
   if (
@@ -380,7 +469,7 @@ function generatePancakeReport(data) {
 
   // Cảnh báo rủi ro (complaint, urgent, cancel)
   const riskItems = data.items.filter((item) => {
-    const intention = analyzeIntention(item.snippet);
+    const intention = analyzeIntentionKeywords(item.snippet);
     return ["complaint", "urgent", "cancel"].includes(intention);
   });
 
@@ -390,7 +479,7 @@ function generatePancakeReport(data) {
     report += `  Không có\n`;
   } else {
     for (const item of riskItems) {
-      const intention = analyzeIntention(item.snippet);
+      const intention = analyzeIntentionKeywords(item.snippet);
       report += `\n\`\`\`\n`;
       report += `${getIntentionIcon(intention)} ${item.name}\n`;
       report += `⏰ ${item.time}\n`;
@@ -446,11 +535,22 @@ function generateBeds24Report(data) {
     }
   }
 
-  // Risk messages - gom theo cơ sở -> kênh
+  // Risk messages - gom theo booking_id trước, chỉ phân tích 1 lần per booking
   const riskMessages = data.risk || [];
-  const risks = [];
+
+  // Group by booking_id, lấy message mới nhất
+  const byBooking = {};
   for (const msg of riskMessages) {
-    const intention = analyzeIntention(msg.message);
+    const bid = msg.booking_id;
+    if (!byBooking[bid] || new Date(msg.last_time) > new Date(byBooking[bid].last_time)) {
+      byBooking[bid] = msg;
+    }
+  }
+
+  // Phân tích intention cho mỗi booking (chỉ 1 lần)
+  const risks = [];
+  for (const msg of Object.values(byBooking)) {
+    const intention = analyzeIntentionKeywords(msg.message);
     if (["complaint", "urgent", "cancel"].includes(intention)) {
       risks.push({ ...msg, intention });
     }
