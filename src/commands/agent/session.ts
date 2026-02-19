@@ -1,13 +1,13 @@
 import crypto from "node:crypto";
-import { listAgentIds } from "../../agents/agent-scope.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
+import type { OpenClawConfig } from "../../config/config.js";
+import { listAgentIds } from "../../agents/agent-scope.js";
 import {
   normalizeThinkLevel,
   normalizeVerboseLevel,
   type ThinkLevel,
   type VerboseLevel,
 } from "../../auto-reply/thinking.js";
-import type { OpenClawConfig } from "../../config/config.js";
 import {
   evaluateSessionFreshness,
   loadSessionStore,
@@ -63,7 +63,7 @@ export function resolveSessionKeyForRequest(opts: {
 
   const ctx: MsgContext | undefined = opts.to?.trim() ? { From: opts.to } : undefined;
   let sessionKey: string | undefined =
-    explicitSessionKey ?? (ctx ? resolveSessionKey(scope, ctx, mainKey) : undefined);
+    explicitSessionKey ?? (ctx ? resolveSessionKey(scope, ctx, mainKey, opts.agentId) : undefined);
 
   // If a session id was provided, prefer to re-use its entry (by id) even when no key was derived.
   if (

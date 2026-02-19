@@ -1,4 +1,5 @@
 import type { loadConfig } from "../../config/config.js";
+import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   evaluateSessionFreshness,
   loadSessionStore,
@@ -22,16 +23,19 @@ export function getSessionSnapshot(
     threadLabel?: string | null;
     threadStarterBody?: string | null;
     parentSessionKey?: string | null;
+    agentId?: string;
   },
 ) {
   const sessionCfg = cfg.session;
   const scope = sessionCfg?.scope ?? "per-sender";
+  const agentId = ctx?.agentId?.trim() || resolveDefaultAgentId(cfg);
   const key =
     ctx?.sessionKey?.trim() ??
     resolveSessionKey(
       scope,
       { From: from, To: "", Body: "" },
       normalizeMainKey(sessionCfg?.mainKey),
+      agentId,
     );
   const store = loadSessionStore(resolveStorePath(sessionCfg?.store));
   const entry = store[key];

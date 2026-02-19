@@ -1,3 +1,4 @@
+import type { FollowupRun } from "./types.js";
 import { defaultRuntime } from "../../../runtime.js";
 import {
   buildCollectPrompt,
@@ -7,7 +8,6 @@ import {
 } from "../../../utils/queue-helpers.js";
 import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
-import type { FollowupRun } from "./types.js";
 
 function previewQueueSummaryPrompt(queue: {
   dropPolicy: "summarize" | "old" | "new";
@@ -27,6 +27,21 @@ function previewQueueSummaryPrompt(queue: {
 function clearQueueSummaryState(queue: { droppedCount: number; summaryLines: string[] }): void {
   queue.droppedCount = 0;
   queue.summaryLines = [];
+}
+
+function hasCrossAgentItems(items: FollowupRun[]): boolean {
+  const agentIds = new Set<string>();
+  for (const item of items) {
+    const agentId = item.run?.agentId?.trim();
+    if (!agentId) {
+      continue;
+    }
+    agentIds.add(agentId);
+    if (agentIds.size > 1) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function scheduleFollowupDrain(
@@ -78,6 +93,20 @@ export function scheduleFollowupDrain(
           });
 
           if (isCrossChannel) {
+            forceIndividualCollect = true;
+            const next = queue.items[0];
+            if (!next) {
+              break;
+            }
+            await runFollowup(next);
+            queue.items.shift();
+            continue;
+          }
+
+          // Check if messages span multiple agents.
+          // If so, process individually to preserve agent isolation.
+          const isCrossAgent = hasCrossAgentItems(queue.items);
+          if (isCrossAgent) {
             forceIndividualCollect = true;
             const next = queue.items[0];
             if (!next) {

@@ -1,3 +1,4 @@
+import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { appendCronStyleCurrentTimeLine } from "../../agents/current-time.js";
 import { resolveHeartbeatReplyPayload } from "../../auto-reply/heartbeat-reply-payload.js";
 import {
@@ -77,7 +78,12 @@ export async function runWebHeartbeatOnce(opts: {
   const sessionCfg = cfg.session;
   const sessionScope = sessionCfg?.scope ?? "per-sender";
   const mainKey = normalizeMainKey(sessionCfg?.mainKey);
-  const sessionKey = resolveSessionKey(sessionScope, { From: to }, mainKey);
+  const sessionKey = resolveSessionKey(
+    sessionScope,
+    { From: to },
+    mainKey,
+    resolveDefaultAgentId(cfg),
+  );
   if (sessionId) {
     const storePath = resolveStorePath(cfg.session?.store);
     const store = loadSessionStore(storePath);
